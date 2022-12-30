@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Static HTTPS website hosting with CloudFront, S3 and Route53"
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: "domain.name"
+    Description: "Root Domain name for the DNS Updates (e.g. domain.name)"
+  AppDomainName:
+    Type: String
+    Default: "app.domain.name"
+    Description: "Domain name for the website (e.g. app.domain.name)"
+  CertificateARN:
+    Type: String
+    Default: "certificate:arn:from:us-east-1"
+    Description: "The Certificate's ARN from the us-east-1 region for CloudFront to bind to"
+
+Resources:
+  # Create the bucket to contain the website HTML
+  S3Bucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Ref AppDomainName
+      WebsiteConfiguration:
+        ErrorDocument: "index.html"
+        IndexDocument: "index.html"
+
+  # Configure the bucket as a CloudFront Origin
+  ReadPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Statement:
+          - Action: "s3:GetObject"
+            Effect: Allow
+            Resource: !Sub "arn:aws:s3:::${S3Bucket}/*"
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
+            # Policy only grants rights to CloudFront.  Otherwise Principal should be '*'
+            # Principal: "*"
+
+  # Configure Access to CloudFront
+  CloudFrontOriginAccessIdentity:
+    Type: "AWS::CloudFront::CloudFrontOriginAccessIdentity"
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Ref S3Bucket
+
+  # Configure CloudFront
+  CloudFrontDistribution:
+    Type: "AWS::CloudFront::Distribution"
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !Ref AppDomainName
+        # React/other SPA-style applications requires
+        CustomErrorResponses:
+          - ErrorCode: 403 # forbidden
+            ResponseCode: 200
+            ResponsePagePath: "/index.html"
+          - ErrorCode: 404 # not found
+            ResponseCode: 200
+            ResponsePagePath: "/index.html"
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: true
+          DefaultTTL: 3600 # in seconds
+          ForwardedValues:
+            Cookies:
+              Forward: none
+            QueryString: false
+          MaxTTL: 86400 # in seconds
+          MinTTL: 60 # in seconds
+          TargetOriginId: s3origin
+          ViewerProtocolPolicy: "allow-all"
+        # This DefaultRootObject configuration is not enough.
+        DefaultRootObject: "/index.html"
+        Enabled: true
+        HttpVersion: http2
+        Origins:
+          - DomainName: !GetAtt "S3Bucket.DomainName"
+            Id: s3origin
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}"
+        PriceClass: "PriceClass_100" # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-cloudfront-distribution-distributionconfig.html#cfn-cloudfront-distribution-distributionconfig-priceclass
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateARN
+          SslSupportMethod: "sni-only"
+          MinimumProtocolVersion: "TLSv1.2_2021"
+  DomainDNSName:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Join ["", [!Ref DomainName, .]]
+      RecordSets:
+        - Name: !Ref AppDomainName
+          Type: A
+          AliasTarget:
+            DNSName: !GetAtt [CloudFrontDistribution, DomainName]
+            HostedZoneId: Z2FDTNDATAQYW2 #always use Z2FDTNDATAQYW2 for CloudFront
+Outputs:
+  Bucket:
+    Description: "S3 Bucket Name"
+    Value: !Ref S3Bucket
+  BucketUrl:
+    Description: "S3 Bucket Url"
+    Value: !GetAtt "S3Bucket.WebsiteURL"
+  DistributionId:
+    Description: "CloudFront Distribution ID"
+    Value: !Ref CloudFrontDistribution
+  Domain:
+    Description: "Cloudfront Domain"
+    Value: !GetAtt CloudFrontDistribution.DomainName

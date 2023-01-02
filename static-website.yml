@@ -49,7 +49,7 @@ Resources:
 
   # Configure CloudFront
   CloudFrontDistribution:
-    Type: "AWS::CloudFront::Distribution"
+    Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
         Aliases:
@@ -80,7 +80,7 @@ Resources:
           MaxTTL: 86400 # in seconds
           MinTTL: 60 # in seconds
           TargetOriginId: s3origin
-          ViewerProtocolPolicy: "allow-all"
+          ViewerProtocolPolicy: "redirect-to-https"
         # This DefaultRootObject configuration is not enough.
         DefaultRootObject: "/index.html"
         Enabled: true

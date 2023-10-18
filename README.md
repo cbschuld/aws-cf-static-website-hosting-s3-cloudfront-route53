@@ -15,6 +15,8 @@ Determine the zone ID using the AWS CLI. In this example I'll use my named profi
 
 ### Using the AWS CLI
 
+Please note you'll need `jq` for this operation to work.  If you are on MacOS, for example, you can add it with brew: `brew install jq`
+
 ```sh
 aws route53 list-hosted-zones-by-name --profile=example |
 jq --arg name "example.com." \

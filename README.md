@@ -37,18 +37,9 @@ Create the certificate in the AWS Certificate Manager (ACM) for your domain. You
 aws cloudformation create-stack --stack-name example-com-certificate --template-body file://certificate.yml \
 --parameters \
 ParameterKey=DomainName,ParameterValue=example.com \
-ParameterKey=HostedZoneId,ParameterValue=Z1UVA2VESUQ1UN \
+ParameterKey=HostedZoneId,ParameterValue=Z1UVA3VESUQ1UN \
 --region=us-east-1 \
 --profile=example
-```
-
-aws cloudformation create-stack --stack-name aztecsoftware-net-certificate --template-body file://certificate.yml \
---parameters \
-ParameterKey=DomainName,ParameterValue=aztecsoftware.net \
-ParameterKey=HostedZoneId,ParameterValue=Z1UVA5VESUQ1GN \
---region=us-east-1 \
---profile=aztec
-
 ```
 
 ### Using the Stack Template(s)
@@ -56,12 +47,9 @@ ParameterKey=HostedZoneId,ParameterValue=Z1UVA5VESUQ1GN \
 
 aws cloudformation create-stack --stack-name aztecsoftware-net-static-website --template-body file://static-website.yml \
 --parameters \
-ParameterKey=DomainName,ParameterValue=aztecsoftware.net \
-ParameterKey=AppDomainName,ParameterValue=aztecsoftware.net \
-ParameterKey=CertificateARN,ParameterValue=arn:aws:acm:us-east-1:115504476576:certificate/6cb63a42-626f-4cc3-91fc-243c25d45b68 \
+ParameterKey=DomainName,ParameterValue=example.com \
+ParameterKey=AppDomainName,ParameterValue=example.com \
+ParameterKey=CertificateARN,ParameterValue=arn:aws:acm:us-east-1:115504476576:certificate/6cb63a42-626f-4cc3-91fd-223c25d45b68 \
 --region=us-east-1 \
---profile=aztec
-
-```
-
+--profile=example
 ```

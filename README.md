@@ -33,8 +33,10 @@ jq --arg name "example.com." \
 
 Create the certificate in the AWS Certificate Manager (ACM) for your domain. You can use the AWS CLI or the AWS Console. Here is the example for the AWS CLI. You need to know the **domain name** and the **hosted zone ID**.
 
+**NOTE:** I have included two different certificate stacks, one with the wildcard and one without the wildcard.  (eg, if the domain is `domain.com` the wildcard certificate will also include `*.domain.com`)
+
 ```sh
-aws cloudformation create-stack --stack-name example-com-certificate --template-body file://certificate.yml \
+aws cloudformation create-stack --stack-name example-com-certificate --template-body file://certificate-with-wildcard.yml \
 --parameters \
 ParameterKey=DomainName,ParameterValue=example.com \
 ParameterKey=HostedZoneId,ParameterValue=Z1UVA3VESUQ1UN \

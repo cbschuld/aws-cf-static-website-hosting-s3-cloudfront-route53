@@ -59,7 +59,7 @@ if [[ "$confirmation" =~ ^[Yy][Ee]?[Ss]?$ ]]; then
 
   # Execute the AWS command with the user-provided variables
   aws cloudformation create-stack --stack-name "$stack_name" \
-  --template-body file://certificate-with-wildcard.yml \
+  --template-body file://certificate-with-wildcard-template.yml \
   --parameters \
   ParameterKey=DomainName,ParameterValue="$domain" \
   ParameterKey=HostedZoneId,ParameterValue="$hosted_zone_id" \

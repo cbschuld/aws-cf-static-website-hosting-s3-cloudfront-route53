@@ -44,6 +44,8 @@ ParameterKey=HostedZoneId,ParameterValue=Z1UVA3VESUQ1UN \
 --profile=example
 ```
 
+You can also use the ZSH script included in the repo as well to create a certificate or a wildcard'ed certificate quickly.
+
 ### Using the Stack Template(s)
 ```
 

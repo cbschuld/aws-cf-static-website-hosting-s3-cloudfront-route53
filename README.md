@@ -2,6 +2,8 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/cbschuld/aws-cf-static-website-hosting-s3-cloudfront-route53)](https://github.com/cbschuld/aws-cf-static-website-hosting-s3-cloudfront-route53/stargazers)
 [![License](https://img.shields.io/github/license/cbschuld/aws-cf-static-website-hosting-s3-cloudfront-route53)](LICENSE)
+
+
 Deploy a secure, scalable static website using S3, CloudFront, and Route53 in minutes!
 
 ## Why Use This Template?

@@ -23,12 +23,15 @@ You need to have a few things in place for these templates to work:
 
 ```mermaid
 graph TD
-    A[User] -->|HTTPS Request| B(Route53)
-    B -->|DNS Resolution| C(CloudFront)
+    U[User] --> A
+    A[Browser/Mobile] -->|DNS Request| B(Route53)
+    B -->|DNS Resolution| A
+    A -->|HTTPS Request| C(CloudFront)
     C -->|Fetch Static Files| D(S3 Bucket)
     D -->|Static Content| C
     C -->|Deliver Content ~ HTTPS| A
-    C --> E[HTTPS Enforced]
+    A -->|HTTP Request| E[HTTPS Enforced]
+    E -->|Redirect| A
 ```
 
 ## Determine the Hosted Zone ID

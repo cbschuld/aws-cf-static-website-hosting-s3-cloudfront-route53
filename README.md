@@ -1,6 +1,16 @@
-# Static HTTPS / SSL Website Hosting with AWS
+# AWS Static Website Hosting with CloudFormation
 
-## Using CloudFront, S3 and Route53
+[![GitHub stars](https://img.shields.io/github/stars/cbschuld/aws-cf-static-website-hosting-s3-cloudfront-route53)](https://github.com/cbschuld/aws-cf-static-website-hosting-s3-cloudfront-route53/stargazers)
+[![License](https://img.shields.io/github/license/cbschuld/aws-cf-static-website-hosting-s3-cloudfront-route53)](LICENSE)
+Deploy a secure, scalable static website using S3, CloudFront, and Route53 in minutes!
+
+## Why Use This Template?
+- **Fast Setup**: Deploy a production-ready static website in under 10 minutes.
+- **Cost-Effective**: Leverages AWS Free Tier-eligible services where possible.
+- **Secure**: Enforces HTTPS with CloudFront and custom domain support.
+- **Customizable**: Easily tweak parameters for your domain and bucket names.
+
+## CloudFront, S3 and Route53
 
 This repository provides an AWS CloudFormation Template to construct a CloudFront SSL/HTTPS static hosted website from an S3 bucket including the necessary Route53 DNS entries.
 
@@ -8,6 +18,16 @@ You need to have a few things in place for these templates to work:
 
 - A certificate in the AWS Certificate Manager (ACM) for your domain
 - A hosted zone in Route53 for your domain
+
+```mermaid
+graph TD
+    A[User] -->|HTTPS Request| B(Route53)
+    B -->|DNS Resolution| C(CloudFront)
+    C -->|Fetch Static Files| D(S3 Bucket)
+    D -->|Static Content| C
+    C -->|Deliver Content ~ HTTPS| A
+    C --> E[HTTPS Enforced]
+```
 
 ## Determine the Hosted Zone ID
 
@@ -57,3 +77,23 @@ ParameterKey=CertificateARN,ParameterValue=arn:aws:acm:us-east-1:115504476576:ce
 --region=us-east-1 \
 --profile=example
 ```
+
+
+You can also use the ZSH script included in the repo as well to create the website after you have created the certificate and received the ARN from it.
+
+## Use Cases
+- Host a personal portfolio or blog.
+- Deploy landing pages for startups or campaigns.
+- Serve static documentation sites for open-source projects.
+
+## Contributing
+Want to improve this template? Submit a pull request or open an issue! We're looking for:
+- New features (e.g., ACM certificate automation).
+- Documentation enhancements.
+- Architecture diagrams or example sites.
+
+## License
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Stay Updated
+Star this repo and follow me on [X](https://x.com/cbschuld) for updates!

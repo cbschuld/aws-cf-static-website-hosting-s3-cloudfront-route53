@@ -9,7 +9,7 @@ Deploy a secure, scalable static website using S3, CloudFront, and Route53 in mi
 ## Why Use This Template?
 - **Fast Setup**: Deploy a production-ready static website in under 10 minutes.
 - **Cost-Effective**: Leverages AWS Free Tier-eligible services where possible.
-- **Secure**: Enforces HTTPS with CloudFront and custom domain support.
+- **Secure**: Private S3 bucket (Origin Access Control + Public Access Block + encryption), HTTPS enforced (TLS 1.2+), and security response headers (HSTS, X-Content-Type-Options, etc.).
 - **Customizable**: Easily tweak parameters for your domain and bucket names.
 
 ## CloudFront, S3 and Route53
@@ -64,27 +64,37 @@ Create the certificate in the AWS Certificate Manager (ACM) for your domain. You
 aws cloudformation create-stack --stack-name example-com-certificate --template-body file://certificate-with-wildcard.yml \
 --parameters \
 ParameterKey=DomainName,ParameterValue=example.com \
-ParameterKey=HostedZoneId,ParameterValue=Z1UVA3VESUQ1UN \
+ParameterKey=HostedZoneId,ParameterValue=Z1UVA2VESUQ1UN \
 --region=us-east-1 \
 --profile=example
 ```
 
-You can also use the ZSH script included in the repo as well to create a certificate or a wildcard'ed certificate quickly.
+You can also use the Bash script included in the repo as well to create a certificate or a wildcard'ed certificate quickly.
 
 ### Using the Stack Template(s)
-```
 
+```sh
 aws cloudformation create-stack --stack-name aztecsoftware-net-static-website --template-body file://static-website.yml \
 --parameters \
 ParameterKey=DomainName,ParameterValue=example.com \
 ParameterKey=AppDomainName,ParameterValue=example.com \
-ParameterKey=CertificateARN,ParameterValue=arn:aws:acm:us-east-1:115504476576:certificate/6cb63a42-626f-4cc3-91fd-223c25d45b68 \
+ParameterKey=CertificateARN,ParameterValue=arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-0000-0000-000000000000 \
 --region=us-east-1 \
 --profile=example
 ```
 
 
-You can also use the ZSH script included in the repo as well to create the website after you have created the certificate and received the ARN from it.
+You can also use the Bash script included in the repo as well to create the website after you have created the certificate and received the ARN from it.
+
+## Security Notes
+
+This template follows current AWS best practice:
+
+- The S3 bucket is **fully private** — it has a Public Access Block (all four flags on), ACLs disabled (`BucketOwnerEnforced`), and default SSE-S3 encryption. CloudFront is the only reader.
+- Access is granted via **Origin Access Control (OAC)** — the modern replacement for the legacy Origin Access Identity (OAI) — and the bucket policy is scoped by `AWS:SourceArn` to this distribution only.
+- CloudFront enforces HTTPS (`redirect-to-https`, TLS 1.2+ `sni-only`) and attaches a **security headers policy** (HSTS with preload, `X-Content-Type-Options`, `X-Frame-Options: DENY`, referrer policy).
+
+**Not included (possible follow-ups):** S3 server access logging and CloudFront standard logging (require a dedicated, locked-down log bucket), and AWS WAF / rate limiting.
 
 ## Use Cases
 - Host a personal portfolio or blog.

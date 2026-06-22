@@ -16,36 +16,80 @@ Parameters:
     Description: "The Certificate's ARN from the us-east-1 region for CloudFront to bind to"
 
 Resources:
-  # Create the bucket to contain the website HTML
+  # Private bucket holding the website files. It is never public: CloudFront
+  # reads it via Origin Access Control (OAC) and the bucket policy below.
   S3Bucket:
     Type: "AWS::S3::Bucket"
     Properties:
       BucketName: !Ref AppDomainName
-      WebsiteConfiguration:
-        ErrorDocument: "index.html"
-        IndexDocument: "index.html"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
 
-  # Configure the bucket as a CloudFront Origin
+  # Grant read access only to this distribution via the CloudFront service
+  # principal, scoped by SourceArn so no other distribution can use the bucket.
   ReadPolicy:
     Type: "AWS::S3::BucketPolicy"
     Properties:
       Bucket: !Ref S3Bucket
       PolicyDocument:
+        Version: "2012-10-17"
         Statement:
-          - Action: "s3:GetObject"
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Action: "s3:GetObject"
             Effect: Allow
             Resource: !Sub "arn:aws:s3:::${S3Bucket}/*"
             Principal:
-              CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
-            # Policy only grants rights to CloudFront.  Otherwise Principal should be '*'
-            # Principal: "*"
+              Service: cloudfront.amazonaws.com
+            Condition:
+              StringEquals:
+                "AWS:SourceArn": !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
 
-  # Configure Access to CloudFront
-  CloudFrontOriginAccessIdentity:
-    Type: "AWS::CloudFront::CloudFrontOriginAccessIdentity"
+  # Origin Access Control (OAC) — the modern replacement for OAI. Signs every
+  # origin request with SigV4 so the bucket can stay fully private.
+  CloudFrontOriginAccessControl:
+    Type: "AWS::CloudFront::OriginAccessControl"
     Properties:
-      CloudFrontOriginAccessIdentityConfig:
-        Comment: !Ref S3Bucket
+      OriginAccessControlConfig:
+        Name: !Sub "${AppDomainName}-oac"
+        Description: !Sub "OAC for ${AppDomainName}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # Security response headers applied to every viewer response.
+  SecurityHeadersPolicy:
+    Type: "AWS::CloudFront::ResponseHeadersPolicy"
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub "${AppDomainName}-security-headers"
+        SecurityHeadersConfig:
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 63072000
+            IncludeSubdomains: true
+            Preload: true
+            Override: true
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+          XSSProtection:
+            Protection: true
+            ModeBlock: true
+            Override: true
 
   # Configure CloudFront
   CloudFrontDistribution:
@@ -54,7 +98,8 @@ Resources:
       DistributionConfig:
         Aliases:
           - !Ref AppDomainName
-        # React/other SPA-style applications requires
+        # React/other SPA-style applications require these. With OAC, S3 returns
+        # 403 for missing objects, so both 403 and 404 are routed to index.html.
         CustomErrorResponses:
           - ErrorCode: 403 # forbidden
             ResponseCode: 200
@@ -79,17 +124,18 @@ Resources:
             QueryString: false
           MaxTTL: 86400 # in seconds
           MinTTL: 60 # in seconds
+          ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
           TargetOriginId: s3origin
           ViewerProtocolPolicy: "redirect-to-https"
-        # This DefaultRootObject configuration is not enough.
-        DefaultRootObject: "/index.html"
+        DefaultRootObject: "index.html"
         Enabled: true
         HttpVersion: http2
         Origins:
-          - DomainName: !GetAtt "S3Bucket.DomainName"
+          - DomainName: !GetAtt "S3Bucket.RegionalDomainName"
             Id: s3origin
+            OriginAccessControlId: !Ref CloudFrontOriginAccessControl
             S3OriginConfig:
-              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}"
+              OriginAccessIdentity: ""
         PriceClass: "PriceClass_100" # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-cloudfront-distribution-distributionconfig.html#cfn-cloudfront-distribution-distributionconfig-priceclass
         ViewerCertificate:
           AcmCertificateArn: !Ref CertificateARN
@@ -109,9 +155,6 @@ Outputs:
   Bucket:
     Description: "S3 Bucket Name"
     Value: !Ref S3Bucket
-  BucketUrl:
-    Description: "S3 Bucket Url"
-    Value: !GetAtt "S3Bucket.WebsiteURL"
   DistributionId:
     Description: "CloudFront Distribution ID"
     Value: !Ref CloudFrontDistribution

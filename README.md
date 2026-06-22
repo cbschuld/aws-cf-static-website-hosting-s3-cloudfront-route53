@@ -64,16 +64,16 @@ Create the certificate in the AWS Certificate Manager (ACM) for your domain. You
 aws cloudformation create-stack --stack-name example-com-certificate --template-body file://certificate-with-wildcard.yml \
 --parameters \
 ParameterKey=DomainName,ParameterValue=example.com \
-ParameterKey=HostedZoneId,ParameterValue=Z1UVA3VESUQ1UN \
+ParameterKey=HostedZoneId,ParameterValue=Z1UVA2VESUQ1UN \
 --region=us-east-1 \
 --profile=example
 ```
 
-You can also use the ZSH script included in the repo as well to create a certificate or a wildcard'ed certificate quickly.
+You can also use the Bash script included in the repo as well to create a certificate or a wildcard'ed certificate quickly.
 
 ### Using the Stack Template(s)
-```
 
+```sh
 aws cloudformation create-stack --stack-name aztecsoftware-net-static-website --template-body file://static-website.yml \
 --parameters \
 ParameterKey=DomainName,ParameterValue=example.com \
@@ -84,7 +84,7 @@ ParameterKey=CertificateARN,ParameterValue=arn:aws:acm:us-east-1:123456789012:ce
 ```
 
 
-You can also use the ZSH script included in the repo as well to create the website after you have created the certificate and received the ARN from it.
+You can also use the Bash script included in the repo as well to create the website after you have created the certificate and received the ARN from it.
 
 ## Security Notes
 

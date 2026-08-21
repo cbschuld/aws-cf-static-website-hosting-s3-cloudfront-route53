@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFront standard logging (v2) to S3 - MUST be deployed to us-east-1"
+
+# WHY THIS IS A SEPARATE STACK
+#
+# CloudFront ACCESS_LOGS delivery is configured through the CloudWatch Logs API
+# in us-east-1 - the docs are explicit that you must call it there "even if you
+# want to enable cross Region delivery to another destination". The website
+# stack is region-flexible (its S3 origin should sit near you), so these
+# resources cannot live inside it. Folding them in behind an "EnableLogging"
+# flag would produce a template that deploys fine everywhere and then fails only
+# for the users who turn the flag on outside us-east-1.
+#
+# Standard logging v2 is preferred over legacy S3 logging because it grants
+# access by bucket policy rather than ACLs, and ACLs are disabled by default on
+# buckets created since April 2023.
+
+Parameters:
+  DistributionArn:
+    Type: String
+    AllowedPattern: "^arn:[a-z0-9-]+:cloudfront::[0-9]{12}:distribution/[A-Z0-9]+$"
+    Description: "The DistributionArn output from the static-website stack"
+
+  RetentionDays:
+    Type: Number
+    Default: 90
+    MinValue: 1
+    MaxValue: 3650
+    Description: "Days to keep access logs before they are expired"
+
+Resources:
+  # A dedicated bucket. Never send logs to the website origin bucket: the OAC
+  # policy there grants CloudFront read access across the whole bucket, so the
+  # logs would be reachable through the distribution.
+  #
+  # The name must match [\w-] for the delivery destination, so it cannot contain
+  # dots - which is another reason not to name it after the domain.
+  LogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-cf-logs-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireLogs
+            Status: Enabled
+            ExpirationInDays: !Ref RetentionDays
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSLogsDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: "s3:PutObject"
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${LogBucket}/AWSLogs/${AWS::AccountId}/CloudFront/*"
+            Condition:
+              StringEquals:
+                "s3:x-amz-acl": "bucket-owner-full-control"
+                "aws:SourceAccount": !Ref "AWS::AccountId"
+              ArnLike:
+                "aws:SourceArn": !Sub "arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:delivery-source:*"
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${LogBucket}"
+              - !Sub "arn:${AWS::Partition}:s3:::${LogBucket}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  # Only ONE delivery source is allowed per distribution. If this fails with
+  # "ResourceId has already been used", an earlier delivery source still exists:
+  #   aws logs delete-delivery-source --name <name> --region us-east-1
+  DeliverySource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub "${AWS::StackName}-cf-source"
+      ResourceArn: !Ref DistributionArn
+      LogType: ACCESS_LOGS
+
+  DeliveryDestination:
+    Type: AWS::Logs::DeliveryDestination
+    DependsOn: LogBucketPolicy
+    Properties:
+      Name: !Sub "${AWS::StackName}-cf-dest"
+      DestinationResourceArn: !GetAtt LogBucket.Arn
+      OutputFormat: w3c
+
+  Delivery:
+    Type: AWS::Logs::Delivery
+    Properties:
+      DeliverySourceName: !Ref DeliverySource
+      DeliveryDestinationArn: !GetAtt DeliveryDestination.Arn
+
+Outputs:
+  LogBucketName:
+    Description: "Bucket receiving CloudFront access logs"
+    Value: !Ref LogBucket
+  LogPath:
+    Description: "Prefix the logs are delivered under"
+    Value: !Sub "s3://${LogBucket}/AWSLogs/${AWS::AccountId}/CloudFront/"

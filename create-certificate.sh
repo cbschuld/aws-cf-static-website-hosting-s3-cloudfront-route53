@@ -1,75 +1,64 @@
 #!/bin/bash
 set -euo pipefail
 
-# Deploy the CloudFormation template that lives next to this script.
+# Deploy the plain certificate stack.
+#
+# The region is NOT configurable: CloudFront can only attach certificates from
+# us-east-1, no matter where the website stack itself lives. Letting the user
+# pick a region here produces a certificate that fails much later, when the
+# distribution is created.
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+source "$SCRIPT_DIR/lib-common.sh"
 TEMPLATE="$SCRIPT_DIR/certificate.yml"
 
-echo "Enter AWS CLI Profile Name:"
-read -r profile
+require_tools aws jq
 
-# Validate AWS CLI Profile Name
-if aws sts get-caller-identity --profile="$profile" > /dev/null 2>&1; then
-  echo "Profile name is valid."
-else
-  echo "Profile name is invalid or unable to authenticate. Please check the profile name and credentials."
-  exit 1
-fi
+profile="$(ask "Enter AWS CLI Profile Name")"
+validate_profile "$profile"
+echo "Profile name is valid."
 
-echo "Enter AWS Region (e.g., us-east-1):"
-read -r region
+domain="$(ask "Enter Domain (e.g. example.com)")"
 
-# Loop until a valid domain is entered
-valid_domain=0
-while [ $valid_domain -eq 0 ]; do
-    echo "Enter Domain:"
-    read -r domain
+hosted_zone_id="$(lookup_hosted_zone "$domain" "$profile")"
+zone_name="$(hosted_zone_name "$hosted_zone_id" "$profile")"
+echo "Hosted Zone: $zone_name ($hosted_zone_id)"
 
-    # Regex for a basic validation of a domain name (simplified)
-    if [[ "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$ ]]; then
-        valid_domain=1
-    else
-        echo "Invalid domain format. Please enter a valid domain."
-    fi
-done
+stack_name="$(ask "Enter Stack Name")"
 
-# Fetch HostedZoneId
-hosted_zone_id=$(aws route53 list-hosted-zones-by-name --profile="$profile" | \
-jq --arg name "$domain." -r '.HostedZones | .[] | select(.Name=="\($name)") | .Id')
-hosted_zone_id=${hosted_zone_id#/hostedzone/}  # Remove '/hostedzone/' prefix
-
-if [ -z "$hosted_zone_id" ]; then
-  echo "Could not find Hosted Zone ID for the domain. Please check the domain name."
-  exit 1
-else
-  echo "Hosted Zone ID: $hosted_zone_id"
-fi
-
-echo "Enter Stack Name:"
-read -r stack_name
-
-# Display all inputs for confirmation
+echo
 echo "You have entered the following information:"
-echo "AWS CLI Profile Name: $profile"
-echo "AWS Region: $region"
-echo "Domain: $domain"
-echo "Hosted Zone ID: $hosted_zone_id"
-echo "Stack Name: $stack_name"
-echo "Do you want to proceed? (yes/no):"
-read -r confirmation
+echo "  AWS CLI Profile Name: $profile"
+echo "  Region:               $CERT_REGION (fixed - required by CloudFront)"
+echo "  Domain:               $domain"
 
-if [[ "$confirmation" =~ ^[Yy][Ee]?[Ss]?$ ]]; then
-  # Execute the AWS command with the user-provided variables
-  aws cloudformation create-stack --stack-name "$stack_name" \
-  --template-body "file://$TEMPLATE" \
-  --parameters \
-  ParameterKey=DomainName,ParameterValue="$domain" \
-  ParameterKey=HostedZoneId,ParameterValue="$hosted_zone_id" \
-  --region "$region" \
-  --profile="$profile"
+echo "  Hosted Zone:          $zone_name ($hosted_zone_id)"
+echo "  Stack Name:           $stack_name"
+echo
 
-  echo "Stack creation command executed."
-else
+if ! confirm; then
   echo "Operation cancelled by the user."
   exit 1
 fi
+
+aws cloudformation deploy \
+  --stack-name "$stack_name" \
+  --template-file "$TEMPLATE" \
+  --parameter-overrides \
+    DomainName="$domain" \
+    HostedZoneId="$hosted_zone_id" \
+  --no-fail-on-empty-changeset \
+  --region "$CERT_REGION" \
+  --profile="$profile"
+
+# `deploy` above already blocked until the stack reached CREATE_COMPLETE, and
+# the ACM resource does not reach that state until DNS validation succeeds - so
+# by this point the certificate is issued.
+cert_arn="$(aws cloudformation describe-stacks \
+  --stack-name "$stack_name" --region "$CERT_REGION" --profile="$profile" \
+  --query "Stacks[0].Outputs[?OutputKey=='CertificateArn'].OutputValue" --output text)"
+
+echo
+echo "Certificate ARN: $cert_arn"
+echo "Pass this to create-static-website.sh."

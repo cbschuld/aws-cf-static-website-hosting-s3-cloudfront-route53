@@ -1,27 +1,144 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "Static HTTPS website hosting with CloudFront, S3 and Route53"
 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Domain and DNS" }
+        Parameters: [HostedZoneId, AppDomainName, CertificateARN]
+      - Label: { default: "Site behavior" }
+        Parameters: [SiteType, PriceClass, MinimumProtocolVersion]
+      - Label: { default: "Security headers" }
+        Parameters:
+          [
+            ContentSecurityPolicy,
+            PermissionsPolicy,
+            HstsIncludeSubdomains,
+            HstsPreload,
+          ]
+      - Label: { default: "Optional integrations" }
+        Parameters: [WebACLArn, ProjectTag]
+
 Parameters:
-  DomainName:
-    Type: String
-    Default: "domain.name"
-    Description: "Root Domain name for the DNS Updates (e.g. domain.name)"
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: >-
+      The Route53 hosted zone ID that owns AppDomainName. Using the zone ID
+      rather than the zone name avoids ambiguity when a private and a public
+      hosted zone share the same domain name.
+
   AppDomainName:
     Type: String
     Default: "app.domain.name"
+    AllowedPattern: "^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$"
+    ConstraintDescription: "Must be a valid fully-qualified domain name (e.g. app.domain.name)"
     Description: "Domain name for the website (e.g. app.domain.name)"
+
   CertificateARN:
     Type: String
-    Default: "certificate:arn:from:us-east-1"
+    AllowedPattern: "^arn:[a-z0-9-]+:acm:us-east-1:[0-9]{12}:certificate/[0-9a-f-]+$"
+    ConstraintDescription: >-
+      Must be an ACM certificate ARN in us-east-1. CloudFront can only use
+      certificates from us-east-1, regardless of where this stack is deployed.
     Description: "The Certificate's ARN from the us-east-1 region for CloudFront to bind to"
+
+  SiteType:
+    Type: String
+    Default: spa
+    AllowedValues: [spa, static]
+    Description: >-
+      'spa' routes 404s to /index.html so a client-side router can handle them.
+      'static' serves a prerendered site (Hugo/Jekyll/etc): real 404s stay 404,
+      and a CloudFront Function resolves directory URLs to their index.html.
+
+  PriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues: [PriceClass_100, PriceClass_200, PriceClass_All]
+    Description: >-
+      Edge locations to serve from. PriceClass_100 (US/CA/EU) is the cheapest;
+      this is a cost decision, not a security one.
+      https://aws.amazon.com/cloudfront/pricing/
+
+  MinimumProtocolVersion:
+    Type: String
+    Default: TLSv1.2_2025
+    AllowedValues: [TLSv1.2_2019, TLSv1.2_2021, TLSv1.2_2025, TLSv1.3_2025]
+    Description: >-
+      Viewer TLS security policy. TLSv1.2_2025 is the current recommended
+      default. TLSv1.3_2025 drops TLS 1.2 entirely, which locks out older
+      clients - only choose it if you know your audience supports TLS 1.3.
+
+  ContentSecurityPolicy:
+    Type: String
+    Default: "base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+    Description: >-
+      Content-Security-Policy header. The default restricts only <base>,
+      <object>/<embed>, and framing - it does NOT restrict script/style/image
+      loading, so it is safe for most static sites but is still opinionated.
+      Set to an empty string to omit the header entirely.
+
+  PermissionsPolicy:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional Permissions-Policy header value, e.g.
+      "camera=(), microphone=(), geolocation=()". Empty means do not send it.
+
+  HstsIncludeSubdomains:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Add includeSubDomains to HSTS. Think before enabling this on an APEX
+      domain: it forces HTTPS on every subdomain, including internal hosts that
+      may not have certificates, as soon as a browser sees the header.
+
+  HstsPreload:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Add the preload directive to HSTS. This alone does nothing - a human must
+      submit the domain at hstspreload.org. Removing it later does NOT remove an
+      already-preloaded domain from browsers that shipped the list.
+
+  WebACLArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional AWS WAFv2 Web ACL ARN. Must be Scope=CLOUDFRONT and therefore
+      created in us-east-1 - see waf-us-east-1.yml. Empty means no WAF.
+
+  ProjectTag:
+    Type: String
+    Default: ""
+    Description: "Optional value for a 'Project' tag on billable resources."
+
+Conditions:
+  IsSpa: !Equals [!Ref SiteType, "spa"]
+  IsStatic: !Equals [!Ref SiteType, "static"]
+  HasCsp: !Not [!Equals [!Ref ContentSecurityPolicy, ""]]
+  HasPermissionsPolicy: !Not [!Equals [!Ref PermissionsPolicy, ""]]
+  HstsSubdomains: !Equals [!Ref HstsIncludeSubdomains, "true"]
+  HstsPreloadOn: !Equals [!Ref HstsPreload, "true"]
+  HasWaf: !Not [!Equals [!Ref WebACLArn, ""]]
+  HasProjectTag: !Not [!Equals [!Ref ProjectTag, ""]]
 
 Resources:
   # Private bucket holding the website files. It is never public: CloudFront
   # reads it via Origin Access Control (OAC) and the bucket policy below.
+  #
+  # The bucket name is deliberately generated by CloudFormation rather than set
+  # to the domain name. S3 bucket names are globally unique across all AWS
+  # accounts, so owning a domain gives you no claim on the matching bucket name.
+  # With OAC the origin is addressed by RegionalDomainName, so the bucket name is
+  # never user-visible anyway. Read it from the Bucket output.
   S3Bucket:
     Type: "AWS::S3::Bucket"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
-      BucketName: !Ref AppDomainName
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -34,9 +151,25 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: ExpireNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+      Tags:
+        - Key: Name
+          Value: !Ref AppDomainName
+        - !If
+          - HasProjectTag
+          - { Key: Project, Value: !Ref ProjectTag }
+          - !Ref "AWS::NoValue"
 
-  # Grant read access only to this distribution via the CloudFront service
-  # principal, scoped by SourceArn so no other distribution can use the bucket.
   ReadPolicy:
     Type: "AWS::S3::BucketPolicy"
     Properties:
@@ -44,52 +177,158 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
+          # Grant read access only to this distribution via the CloudFront
+          # service principal, scoped by SourceArn so no other distribution can
+          # use the bucket.
           - Sid: AllowCloudFrontServicePrincipalReadOnly
             Action: "s3:GetObject"
             Effect: Allow
-            Resource: !Sub "arn:aws:s3:::${S3Bucket}/*"
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${S3Bucket}/*"
             Principal:
               Service: cloudfront.amazonaws.com
             Condition:
               StringEquals:
-                "AWS:SourceArn": !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+                "AWS:SourceArn": !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
 
-  # Origin Access Control (OAC) — the modern replacement for OAI. Signs every
+          # ListBucket makes S3 return 404 (not 403) for a missing key. Without
+          # it, "file not found" and "access denied" are indistinguishable, so a
+          # static site can never return a real 404 and a genuine permissions
+          # failure looks like a missing page.
+          #
+          # !! INVARIANT !! This is safe only because no viewer-controlled query
+          # string can reach the origin: CachePolicy sets QueryStringBehavior to
+          # 'none' and the cache behavior has NO OriginRequestPolicyId. If either
+          # changes, a viewer could send ?list-type=2 and OAC would happily sign
+          # it - OAC is not a defense here, it signs whatever reaches the origin.
+          # Note Resource is the BUCKET arn, not the /* object arn.
+          - Sid: AllowCloudFrontServicePrincipalListBucket
+            Action: "s3:ListBucket"
+            Effect: Allow
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${S3Bucket}"
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Condition:
+              StringEquals:
+                "AWS:SourceArn": !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+
+          # Reject any non-TLS request outright (AWS Security Hub control S3.5).
+          - Sid: DenyInsecureTransport
+            Action: "s3:*"
+            Effect: Deny
+            Principal: "*"
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${S3Bucket}"
+              - !Sub "arn:${AWS::Partition}:s3:::${S3Bucket}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  # Origin Access Control (OAC) - the modern replacement for OAI. Signs every
   # origin request with SigV4 so the bucket can stay fully private.
+  #
+  # Names here are derived from the stack name, not the domain: CloudFront
+  # resource names have length limits, and CloudFront Function names reject dots
+  # outright (see SiteFunction below).
   CloudFrontOriginAccessControl:
     Type: "AWS::CloudFront::OriginAccessControl"
     Properties:
       OriginAccessControlConfig:
-        Name: !Sub "${AppDomainName}-oac"
+        Name: !Sub "${AWS::StackName}-oac"
         Description: !Sub "OAC for ${AppDomainName}"
         OriginAccessControlOriginType: s3
         SigningBehavior: always
         SigningProtocol: sigv4
 
+  # Replaces the deprecated ForwardedValues block. MinTTL is 0 on purpose: a
+  # non-zero minimum makes CloudFront ignore the origin's Cache-Control
+  # (including no-cache/no-store/max-age=0) for that duration, which would make
+  # the per-file cache headers set by deploy-content.sh meaningless.
+  #
+  # EnableAcceptEncoding* is required for correct compression once you move off
+  # ForwardedValues - Compress:true alone is not enough, and without these the
+  # gzip and brotli variants collide on the same cache key.
+  CachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "${AWS::StackName}-cache"
+        Comment: !Sub "Static site cache policy for ${AppDomainName}"
+        MinTTL: 0
+        DefaultTTL: 3600
+        MaxTTL: 86400
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
   # Security response headers applied to every viewer response.
+  # X-XSS-Protection is deliberately absent: it is deprecated, modern browsers
+  # ignore it, and the legacy auditor it enabled introduced its own bugs.
   SecurityHeadersPolicy:
     Type: "AWS::CloudFront::ResponseHeadersPolicy"
     Properties:
       ResponseHeadersPolicyConfig:
-        Name: !Sub "${AppDomainName}-security-headers"
+        Name: !Sub "${AWS::StackName}-security-headers"
         SecurityHeadersConfig:
           StrictTransportSecurity:
             AccessControlMaxAgeSec: 63072000
-            IncludeSubdomains: true
-            Preload: true
+            IncludeSubdomains: !If [HstsSubdomains, true, false]
+            Preload: !If [HstsPreloadOn, true, false]
             Override: true
           ContentTypeOptions:
             Override: true
+          # Kept alongside CSP frame-ancestors as a fallback for old browsers.
           FrameOptions:
             FrameOption: DENY
             Override: true
           ReferrerPolicy:
             ReferrerPolicy: strict-origin-when-cross-origin
             Override: true
-          XSSProtection:
-            Protection: true
-            ModeBlock: true
-            Override: true
+          ContentSecurityPolicy: !If
+            - HasCsp
+            - ContentSecurityPolicy: !Ref ContentSecurityPolicy
+              Override: true
+            - !Ref "AWS::NoValue"
+        CustomHeadersConfig: !If
+          - HasPermissionsPolicy
+          - Items:
+              - Header: Permissions-Policy
+                Value: !Ref PermissionsPolicy
+                Override: true
+          - !Ref "AWS::NoValue"
+
+  # Static-site mode only: resolve directory URLs to their index document.
+  # With an S3 REST origin (unlike the legacy S3 website endpoint) CloudFront
+  # does not do this itself.
+  #
+  # Only URIs ending in "/" are rewritten. Rewriting extensionless URIs too is
+  # tempting but wrong - it would break legitimate extensionless objects such as
+  # /LICENSE, /robots or /CNAME.
+  #
+  # Name must match [a-zA-Z0-9-_]{1,64} - dots are invalid, so this cannot be
+  # derived from the domain name.
+  SiteFunction:
+    Type: AWS::CloudFront::Function
+    Condition: IsStatic
+    Properties:
+      Name: !Sub "${AWS::StackName}-dir-index"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: !Sub "Directory index rewrite for ${AppDomainName}"
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+            var request = event.request;
+            if (request.uri.endsWith('/')) {
+                request.uri += 'index.html';
+            }
+            return request;
+        }
 
   # Configure CloudFront
   CloudFrontDistribution:
@@ -98,66 +337,91 @@ Resources:
       DistributionConfig:
         Aliases:
           - !Ref AppDomainName
-        # React/other SPA-style applications require these. With OAC, S3 returns
-        # 403 for missing objects, so both 403 and 404 are routed to index.html.
-        CustomErrorResponses:
-          - ErrorCode: 403 # forbidden
-            ResponseCode: 200
-            ResponsePagePath: "/index.html"
-          - ErrorCode: 404 # not found
-            ResponseCode: 200
-            ResponsePagePath: "/index.html"
+        Comment: !Sub "Static site for ${AppDomainName}"
+        # SPA mode only. 404 (not 403) is rewritten: because the bucket policy
+        # grants ListBucket, a missing object is a genuine 404, while a 403 now
+        # means a real authorization failure - a broken bucket policy, KMS, or
+        # OAC misconfiguration. Rewriting 403 to a 200 page would silently hide
+        # all of those.
+        CustomErrorResponses: !If
+          - IsSpa
+          - - ErrorCode: 404
+              ResponseCode: 200
+              ResponsePagePath: "/index.html"
+              ErrorCachingMinTTL: 10
+          - !Ref "AWS::NoValue"
         DefaultCacheBehavior:
-          AllowedMethods:
-            - GET
-            - HEAD
-            - OPTIONS
-          CachedMethods:
-            - GET
-            - HEAD
-            - OPTIONS
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
           Compress: true
-          DefaultTTL: 3600 # in seconds
-          ForwardedValues:
-            Cookies:
-              Forward: none
-            QueryString: false
-          MaxTTL: 86400 # in seconds
-          MinTTL: 60 # in seconds
+          CachePolicyId: !Ref CachePolicy
+          # No OriginRequestPolicyId - see the ListBucket INVARIANT above.
           ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+          FunctionAssociations: !If
+            - IsStatic
+            - - EventType: viewer-request
+                FunctionARN: !GetAtt SiteFunction.FunctionMetadata.FunctionARN
+            - !Ref "AWS::NoValue"
           TargetOriginId: s3origin
           ViewerProtocolPolicy: "redirect-to-https"
         DefaultRootObject: "index.html"
         Enabled: true
-        HttpVersion: http2
+        HttpVersion: http2and3
+        IPV6Enabled: true
         Origins:
           - DomainName: !GetAtt "S3Bucket.RegionalDomainName"
             Id: s3origin
             OriginAccessControlId: !Ref CloudFrontOriginAccessControl
+            # Required with OAC; the empty OAI is the documented pattern.
             S3OriginConfig:
               OriginAccessIdentity: ""
-        PriceClass: "PriceClass_100" # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-cloudfront-distribution-distributionconfig.html#cfn-cloudfront-distribution-distributionconfig-priceclass
+        PriceClass: !Ref PriceClass
         ViewerCertificate:
           AcmCertificateArn: !Ref CertificateARN
           SslSupportMethod: "sni-only"
-          MinimumProtocolVersion: "TLSv1.2_2021"
+          MinimumProtocolVersion: !Ref MinimumProtocolVersion
+        WebACLId: !If [HasWaf, !Ref WebACLArn, !Ref "AWS::NoValue"]
+      Tags:
+        - Key: Name
+          Value: !Ref AppDomainName
+        - !If
+          - HasProjectTag
+          - { Key: Project, Value: !Ref ProjectTag }
+          - !Ref "AWS::NoValue"
+
+  # Both records are required. IPv6 clients cannot resolve the site from the A
+  # record alone once IPV6Enabled is true and an alternate domain name is used.
   DomainDNSName:
     Type: AWS::Route53::RecordSetGroup
     Properties:
-      HostedZoneName: !Join ["", [!Ref DomainName, .]]
+      HostedZoneId: !Ref HostedZoneId
       RecordSets:
         - Name: !Ref AppDomainName
           Type: A
           AliasTarget:
             DNSName: !GetAtt [CloudFrontDistribution, DomainName]
-            HostedZoneId: Z2FDTNDATAQYW2 #always use Z2FDTNDATAQYW2 for CloudFront
+            HostedZoneId: Z2FDTNDATAQYW2 # always use Z2FDTNDATAQYW2 for CloudFront
+            EvaluateTargetHealth: false
+        - Name: !Ref AppDomainName
+          Type: AAAA
+          AliasTarget:
+            DNSName: !GetAtt [CloudFrontDistribution, DomainName]
+            HostedZoneId: Z2FDTNDATAQYW2
+            EvaluateTargetHealth: false
+
 Outputs:
   Bucket:
-    Description: "S3 Bucket Name"
+    Description: "S3 Bucket Name (generated - pass this to deploy-content.sh)"
     Value: !Ref S3Bucket
   DistributionId:
     Description: "CloudFront Distribution ID"
     Value: !Ref CloudFrontDistribution
+  DistributionArn:
+    Description: "CloudFront Distribution ARN (needed by logging-us-east-1.yml)"
+    Value: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
   Domain:
     Description: "Cloudfront Domain"
     Value: !GetAtt CloudFrontDistribution.DomainName
+  SiteUrl:
+    Description: "The website URL"
+    Value: !Sub "https://${AppDomainName}"

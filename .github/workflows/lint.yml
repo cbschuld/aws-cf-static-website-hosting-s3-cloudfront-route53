@@ -1,0 +1,48 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  templates:
+    name: cfn-lint
+    runs-on: ubuntu-latest
+    steps:
+      # Actions are pinned to commit SHAs, not tags: a tag can be moved to point
+      # at different code after review.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install cfn-lint
+      - run: cfn-lint ./*.yml
+
+  scripts:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: shellcheck ./*.sh
+
+  # Advisory only. Checkov is useful for spotting drift, but gating on it pushes
+  # a small template toward enabling WAF/logging/versioning unconditionally,
+  # which is exactly the cargo cult this repo tries to keep optional. Read the
+  # findings; do not auto-fix them.
+  checkov:
+    name: checkov (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install checkov
+      # Skips live in .checkov.yml, each with a written justification.
+      - run: checkov -d . --config-file .checkov.yml --soft-fail

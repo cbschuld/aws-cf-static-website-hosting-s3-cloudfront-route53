@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Optional AWS WAFv2 Web ACL for CloudFront - MUST be deployed to us-east-1"
+
+# WHY THIS IS SEPARATE, AND WHETHER YOU NEED IT AT ALL
+#
+# A Web ACL with Scope: CLOUDFRONT must be created in us-east-1. The website
+# stack is region-flexible, so this cannot be a flag inside it.
+#
+# Be honest about the value before deploying this. On a GET/HEAD-only static
+# site served from a private S3 bucket:
+#   - CommonRuleSet and KnownBadInputs mostly guard against SQL injection, LFI,
+#     and similar server-side classes that this stack cannot suffer - there is
+#     no application server and no database.
+#   - A rate-based rule counts EVERY asset request, so a normal visitor loading
+#     40 files counts 40 times, and everyone behind one corporate NAT or mobile
+#     carrier gateway shares a single counter.
+#   - AWS Shield Standard already protects CloudFront from network/transport
+#     DDoS at no cost, with or without this.
+#
+# Real reasons to deploy it anyway: a compliance requirement, geo-blocking, or
+# capping bandwidth costs from scrapers.
+#
+# COST: ~$5/month per Web ACL, PLUS ~$1/month per rule, PLUS ~$0.60 per million
+# requests. The managed rule groups below count as rules. Budget well above $5.
+
+Parameters:
+  RateLimit:
+    Type: Number
+    Default: 2000
+    MinValue: 10
+    Description: >-
+      Max requests per 5-minute window from a single IP before blocking. Counts
+      every asset, not every page view - keep it generous.
+
+  EnableManagedRules:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Add the AWS managed Common and KnownBadInputs rule groups. Off by default:
+      see the note above on why they add little to a static S3 origin.
+
+Conditions:
+  UseManagedRules: !Equals [!Ref EnableManagedRules, "true"]
+
+Resources:
+  WebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub "${AWS::StackName}-web-acl"
+      Scope: CLOUDFRONT
+      Description: "Static website protection"
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${AWS::StackName}-web-acl"
+      Rules:
+        - Name: RateLimitPerIp
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref RateLimit
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "${AWS::StackName}-rate-limit"
+        - !If
+          - UseManagedRules
+          - Name: AWSManagedRulesCommonRuleSet
+            Priority: 1
+            OverrideAction:
+              None: {}
+            Statement:
+              ManagedRuleGroupStatement:
+                VendorName: AWS
+                Name: AWSManagedRulesCommonRuleSet
+            VisibilityConfig:
+              SampledRequestsEnabled: true
+              CloudWatchMetricsEnabled: true
+              MetricName: !Sub "${AWS::StackName}-common"
+          - !Ref "AWS::NoValue"
+        - !If
+          - UseManagedRules
+          - Name: AWSManagedRulesKnownBadInputsRuleSet
+            Priority: 2
+            OverrideAction:
+              None: {}
+            Statement:
+              ManagedRuleGroupStatement:
+                VendorName: AWS
+                Name: AWSManagedRulesKnownBadInputsRuleSet
+            VisibilityConfig:
+              SampledRequestsEnabled: true
+              CloudWatchMetricsEnabled: true
+              MetricName: !Sub "${AWS::StackName}-bad-inputs"
+          - !Ref "AWS::NoValue"
+
+Outputs:
+  WebACLArn:
+    Description: >-
+      Pass this as the WebACLArn parameter of static-website.yml. Note this is
+      the ARN (GetAtt Arn), not the Ref/Id - CloudFront requires the ARN, and
+      AWS::WAFv2::WebACLAssociation does not apply to CloudFront distributions.
+    Value: !GetAtt WebACL.Arn

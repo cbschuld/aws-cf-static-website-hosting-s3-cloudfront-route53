@@ -29,6 +29,26 @@ Parameters:
     AllowedPattern: "^[A-Za-z0-9._-]+$"
     Description: "Repository name (e.g. developer.inspectionsupport.com)"
 
+  GitHubOrgId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^[0-9]*$"
+    Description: >-
+      Numeric GitHub organization ID. Required only if your org issues IMMUTABLE
+      subject claims, in which case the sub looks like
+      repo:myorg@123/myrepo@456:ref:refs/heads/main rather than
+      repo:myorg/myrepo:ref:refs/heads/main. Leave empty for the classic format.
+      Find it with:
+        gh api /repos/OWNER/REPO --jq '.owner.id'
+
+  GitHubRepoId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^[0-9]*$"
+    Description: >-
+      Numeric GitHub repository ID; see GitHubOrgId. Both must be set together.
+        gh api /repos/OWNER/REPO --jq '.id'
+
   GitHubRef:
     Type: String
     Default: "refs/heads/main"
@@ -54,6 +74,19 @@ Parameters:
     Type: String
     AllowedPattern: "^[A-Za-z0-9+=,.@_-]{1,64}$"
     Description: "Name for the created role"
+
+Conditions:
+  # Immutable subjects embed the org and repo IDs, so a repo that is deleted and
+  # recreated under the same name gets a different subject and cannot inherit the
+  # old trust. Some orgs enable this; the claim format differs and a trust policy
+  # written for the classic format silently fails to match, producing an opaque
+  # "Not authorized to perform sts:AssumeRoleWithWebIdentity".
+  #
+  # Check what your repo actually issues:
+  #   gh api /repos/OWNER/REPO/actions/oidc/customization/sub --jq .sub_claim_prefix
+  UseImmutableSubject: !And
+    - !Not [!Equals [!Ref GitHubOrgId, ""]]
+    - !Not [!Equals [!Ref GitHubRepoId, ""]]
 
 Resources:
   DeployRole:
@@ -90,7 +123,10 @@ Resources:
             Condition:
               StringEquals:
                 "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-                "token.actions.githubusercontent.com:sub": !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:${GitHubRef}"
+                "token.actions.githubusercontent.com:sub": !If
+                  - UseImmutableSubject
+                  - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:ref:${GitHubRef}"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:${GitHubRef}"
 
       # WHAT IT MAY DO ONCE ASSUMED.
       #
@@ -140,4 +176,7 @@ Outputs:
     Value: !GetAtt DeployRole.Arn
   TrustedSubject:
     Description: "The exact OIDC subject permitted to assume the role"
-    Value: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:${GitHubRef}"
+    Value: !If
+      - UseImmutableSubject
+      - !Sub "repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:ref:${GitHubRef}"
+      - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:${GitHubRef}"

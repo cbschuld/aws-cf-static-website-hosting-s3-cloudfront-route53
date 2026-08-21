@@ -226,6 +226,38 @@ aws iam list-open-id-connect-providers \
   --query "OpenIDConnectProviderList[?contains(Arn,'githubusercontent')]"
 ```
 
+### Immutable subject claims
+
+Some GitHub orgs issue **immutable** subject claims, which embed numeric org and
+repo IDs so a deleted-and-recreated repo cannot inherit the old trust:
+
+```
+repo:myorg@19309466/myrepo@1342119138:ref:refs/heads/main
+```
+
+rather than the classic `repo:myorg/myrepo:ref:refs/heads/main`. A trust policy
+written for the classic form silently fails to match, and the only symptom is an
+opaque `Not authorized to perform sts:AssumeRoleWithWebIdentity`.
+
+Check which form your repo issues **before** deploying:
+
+```bash
+gh api /repos/OWNER/REPO/actions/oidc/customization/sub --jq .sub_claim_prefix
+```
+
+If it comes back with `@`-suffixed IDs, pass them:
+
+```bash
+--parameter-overrides ... \
+  GitHubOrgId=$(gh api /repos/OWNER/REPO --jq '.owner.id') \
+  GitHubRepoId=$(gh api /repos/OWNER/REPO --jq '.id')
+```
+
+The `TrustedSubject` stack output always shows the exact subject the policy
+expects — compare it against the token if assumption fails.
+
+### Scoping
+
 Trust is pinned to one exact ref (`GitHubRef`, default `refs/heads/main`) with
 `StringEquals`, and the parameter rejects wildcards. `repo:org/repo:*` would let
 any branch — including one pushed by anyone with write access — publish to

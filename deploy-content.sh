@@ -54,7 +54,7 @@ echo "==> Syncing immutable assets (content-hashed) first"
 # that has not landed yet.
 excludes=()
 for p in "${MUTABLE_PATTERNS[@]}"; do excludes+=(--exclude "$p"); done
-aws s3 sync "$SRC" "s3://$BUCKET" \
+aws s3 sync --no-progress "$SRC" "s3://$BUCKET" \
   "${excludes[@]}" \
   --cache-control "$IMMUTABLE" \
   ${AWS_ARGS[@]+"${AWS_ARGS[@]}"}
@@ -67,7 +67,7 @@ for p in "${MUTABLE_PATTERNS[@]}"; do includes+=(--include "$p"); done
 # content-hashed assets are deliberately left in place: a client that loaded the
 # previous HTML may still be fetching them, and deleting them mid-flight would
 # break that page. Prune them separately when you want the space back.
-aws s3 sync "$SRC" "s3://$BUCKET" \
+aws s3 sync --no-progress "$SRC" "s3://$BUCKET" \
   "${includes[@]}" \
   --delete \
   --cache-control "$REVALIDATE" \

@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "GitHub Actions OIDC deploy role for a static-website stack (content publish only)"
+
+# WHY THIS IS A SEPARATE STACK
+#
+# It creates a named IAM role, so it needs CAPABILITY_NAMED_IAM. Requiring that
+# on the website stack would force every deployer to acknowledge IAM capabilities
+# for a site that otherwise creates none.
+#
+# It also assumes the GitHub OIDC identity provider ALREADY EXISTS in the
+# account. That provider is account-global: creating a second one for
+# token.actions.githubusercontent.com fails with EntityAlreadyExists, and most
+# accounts that use GitHub Actions already have one. Check before deploying:
+#
+#   aws iam list-open-id-connect-providers \
+#     --query "OpenIDConnectProviderList[?contains(Arn,'githubusercontent')]"
+#
+# If it genuinely does not exist, create it once, outside this template, so that
+# tearing this stack down cannot remove a provider other roles depend on.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9][A-Za-z0-9-]*$"
+    Description: "GitHub organization or user that owns the repo (e.g. inspectionsupport)"
+
+  GitHubRepo:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9._-]+$"
+    Description: "Repository name (e.g. developer.inspectionsupport.com)"
+
+  GitHubRef:
+    Type: String
+    Default: "refs/heads/main"
+    AllowedPattern: "^refs/(heads|tags)/[A-Za-z0-9._/-]+$"
+    ConstraintDescription: >-
+      Must be a single concrete ref such as refs/heads/main. Wildcards are
+      deliberately not accepted - see the trust policy comment.
+    Description: >-
+      The exact git ref allowed to assume this role. Wildcards are rejected on
+      purpose: this is the security boundary.
+
+  BucketName:
+    Type: String
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+    Description: "The website bucket this role may publish to"
+
+  DistributionId:
+    Type: String
+    AllowedPattern: "^[A-Z0-9]+$"
+    Description: "The CloudFront distribution this role may invalidate"
+
+  RoleName:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9+=,.@_-]{1,64}$"
+    Description: "Name for the created role"
+
+Resources:
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: !Sub "GitHub Actions content deploy for ${GitHubOrg}/${GitHubRepo}"
+      # IAM's floor for this ceiling is 3600s. The workflow should request a much
+      # shorter session (role-duration-seconds: 900); this only caps it.
+      MaxSessionDuration: 3600
+
+      # WHO MAY ASSUME THIS ROLE.
+      #
+      # Both conditions are StringEquals, deliberately - NOT StringLike. With a
+      # concrete ref the two behave identically today, but StringLike would
+      # silently widen trust the moment GitHubRef contained a wildcard: a value
+      # like refs/heads/* would let any branch, pushed by anyone with write
+      # access, publish to production. Exact match makes that impossible.
+      #
+      # The aud check is not optional. Without it, any GitHub Actions token in
+      # the world - from any repo - is a valid signature for this provider; the
+      # sub claim is what scopes it, and aud is what stops token reuse across
+      # audiences.
+      #
+      # Pull request runs carry sub=repo:ORG/REPO:pull_request, which does not
+      # match a refs/heads/... subject, so forked PRs cannot assume this role.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+                "token.actions.githubusercontent.com:sub": !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:${GitHubRef}"
+
+      # WHAT IT MAY DO ONCE ASSUMED.
+      #
+      # Publishing content and nothing else. A leaked token can overwrite the
+      # published site and invalidate the CDN; it cannot read another bucket,
+      # change the distribution, or touch IAM.
+      Policies:
+        - PolicyName: publish-site-content
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # `aws s3 sync` lists the destination to diff against the source,
+              # and again to decide what --delete should remove.
+              - Sid: ListTargetBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${BucketName}"
+
+              # Upload new/changed objects and remove ones the build dropped.
+              #
+              # Note there is NO s3:GetObject: a local-to-S3 sync only lists and
+              # puts, never reads objects back. GetObject would only be needed
+              # for an S3-to-itself `cp --metadata-directive REPLACE`, which is a
+              # manual repair documented in deploy-content.sh, not a CI step.
+              #
+              # No s3:PutObjectAcl either - the bucket is BucketOwnerEnforced, so
+              # object ACLs are disabled entirely.
+              - Sid: WriteSiteObjects
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${BucketName}/*"
+
+              # CreateInvalidation publishes the change; GetInvalidation backs
+              # `aws cloudfront wait invalidation-completed` in the workflow.
+              - Sid: InvalidateDistribution
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
+                Resource: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${DistributionId}"
+
+Outputs:
+  RoleArn:
+    Description: "Set this as the AWS_DEPLOY_ROLE_ARN repository variable in GitHub"
+    Value: !GetAtt DeployRole.Arn
+  TrustedSubject:
+    Description: "The exact OIDC subject permitted to assume the role"
+    Value: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:${GitHubRef}"

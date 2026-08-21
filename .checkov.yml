@@ -1,0 +1,34 @@
+# Checkov runs advisory-only in CI (see .github/workflows/lint.yml).
+#
+# Every skip below was reviewed against this specific architecture - a private,
+# CloudFront-fronted static site - and declined for a stated reason. Do NOT add
+# a skip here to make CI green; the job cannot fail. Add one only when the check
+# genuinely does not apply, and say why.
+
+framework:
+  - cloudformation
+
+skip-check:
+  # S3 server access logging on the origin bucket. CloudFront is the only
+  # principal that can read it, so per-object S3 logs would record exactly one
+  # client and duplicate what CloudFront access logging already captures. Also
+  # fires on the log bucket itself, where enabling it is circular.
+  - CKV_AWS_18
+
+  # Versioning on the log bucket. Access logs are written once and expired by a
+  # lifecycle rule; versioning them only doubles storage cost. The *content*
+  # bucket does have versioning enabled.
+  - CKV_AWS_21
+
+  # CloudFront access logging. Deliberately opt-in via logging-us-east-1.yml:
+  # the delivery resources must be created in us-east-1, so they cannot live in
+  # the region-flexible website stack. See that template's header.
+  - CKV_AWS_86
+
+  # WAF Log4Shell (CVE-2021-44228) rule. There is no origin server and no Java -
+  # the origin is a private S3 bucket serving static objects.
+  - CKV_AWS_192
+
+  # ACM wildcard domain. certificate-with-wildcard.yml exists precisely to issue
+  # a wildcard certificate; certificate.yml is the non-wildcard alternative.
+  - CKV2_AWS_71

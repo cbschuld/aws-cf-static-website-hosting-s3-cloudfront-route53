@@ -94,6 +94,25 @@ Resources:
 
   RedirectDistribution:
     Type: AWS::CloudFront::Distribution
+    # Scoped to THIS resource on purpose. A global skip would also silence these
+    # for static-website.yml, where redirect-to-https is mandatory and the WAF
+    # hook is a real (opt-in) parameter.
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_34
+            comment: >-
+              allow-all is deliberate for a redirect-only distribution. CloudFront
+              runs the protocol redirect BEFORE the viewer-request function, so
+              redirect-to-https costs an http visitor two hops - and retired
+              hostnames are precisely where inbound links are still http://. The
+              function answers both schemes in one hop and only ever redirects to
+              an https:// destination, so no content is served over plaintext.
+          - id: CKV_AWS_68
+            comment: >-
+              This distribution serves no content. Every request is terminated by
+              a viewer-request function returning a 301 before the cache or origin
+              is reached, so there is no application surface for a WAF to protect.
     Properties:
       DistributionConfig:
         Aliases:

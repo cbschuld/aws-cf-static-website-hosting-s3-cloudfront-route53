@@ -7,7 +7,7 @@ Metadata:
       - Label: { default: "Domain and DNS" }
         Parameters: [HostedZoneId, AppDomainName, CertificateARN]
       - Label: { default: "Site behavior" }
-        Parameters: [SiteType, PriceClass, MinimumProtocolVersion]
+        Parameters: [SiteType, DirectoryRedirects, PriceClass, MinimumProtocolVersion]
       - Label: { default: "Security headers" }
         Parameters:
           [
@@ -50,6 +50,17 @@ Parameters:
       'spa' routes 404s to /index.html so a client-side router can handle them.
       'static' serves a prerendered site (Hugo/Jekyll/etc): real 404s stay 404,
       and a CloudFront Function resolves directory URLs to their index.html.
+
+  DirectoryRedirects:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >-
+      Optional exact paths to 301 to their trailing-slash form, e.g.
+      "/reference,/guide". Without this, /reference 404s while /reference/ works,
+      because only trailing-slash URIs are rewritten to index.html. Applies to
+      SiteType=static only. Empty by default, and deliberately NOT a generic
+      "redirect anything without a dot" rule - that would break legitimate
+      extensionless objects such as /LICENSE, /robots or /CNAME.
 
   PriceClass:
     Type: String
@@ -346,14 +357,36 @@ Resources:
       FunctionConfig:
         Comment: !Sub "Directory index rewrite for ${AppDomainName}"
         Runtime: cloudfront-js-2.0
-      FunctionCode: |
-        function handler(event) {
-            var request = event.request;
-            if (request.uri.endsWith('/')) {
-                request.uri += 'index.html';
-            }
-            return request;
-        }
+      # !Sub with a value map so the redirect list can be injected. There are no
+      # ${...} sequences in the JS itself, so nothing else is substituted.
+      FunctionCode: !Sub
+        - |
+          function handler(event) {
+              var request = event.request;
+              var uri = request.uri;
+
+              // Exact directory routes reached without their trailing slash.
+              // A 301 rather than an internal rewrite, so the canonical URL is
+              // what lands in the address bar and in search indexes.
+              var redirects = '${JoinedRedirects}'.split(',');
+              for (var i = 0; i < redirects.length; i++) {
+                  if (redirects[i] && uri === redirects[i]) {
+                      return {
+                          statusCode: 301,
+                          statusDescription: 'Moved Permanently',
+                          headers: { location: { value: uri + '/' } }
+                      };
+                  }
+              }
+
+              // With an S3 REST origin (unlike the legacy website endpoint)
+              // CloudFront does not resolve directory index documents itself.
+              if (uri.endsWith('/')) {
+                  request.uri += 'index.html';
+              }
+              return request;
+          }
+        - JoinedRedirects: !Join [",", !Ref DirectoryRedirects]
 
   # Configure CloudFront
   CloudFrontDistribution:

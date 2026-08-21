@@ -49,26 +49,63 @@ MUTABLE_PATTERNS=(
   "service-worker.js" "sw.js"
 )
 
-echo "==> Syncing immutable assets (content-hashed) first"
+# Prefixes holding PERMANENT, PINNED artifacts - published once under a URL that
+# encodes a version, and referenced by third parties forever after.
+#
+# These need their own class because extension alone gets it dangerously wrong.
+# A pinned API spec at v/isn/8665/openapi.json is a *.json file, so the mutable
+# rules above would (a) serve it max-age=0 and, far worse, (b) DELETE it from the
+# bucket the moment a build stops emitting that version - which is every build
+# after the version bumps, since most generators wipe their output directory.
+# That silently breaks every consumer who pinned the URL.
+#
+# So: URL semantics decide cache and delete policy, not file extension.
+# Anything under these prefixes is uploaded immutable, never deleted, and never
+# invalidated. Override with e.g. PROTECTED_PREFIXES="v/ releases/".
+read -r -a PROTECTED_PREFIXES <<< "${PROTECTED_PREFIXES:-v/}"
+
+# Build the filter args that keep the protected prefixes out of a sync pass.
+# ORDER MATTERS: the AWS CLI applies --include/--exclude in sequence and the LAST
+# match wins, so these must be appended AFTER any --include that would match.
+protected_excludes=()
+for p in ${PROTECTED_PREFIXES[@]+"${PROTECTED_PREFIXES[@]}"}; do
+  protected_excludes+=(--exclude "${p%/}/*")
+done
+
+# Pass 1: pinned artifacts. No --delete, ever - that is the whole point.
+for p in ${PROTECTED_PREFIXES[@]+"${PROTECTED_PREFIXES[@]}"}; do
+  [ -d "$SRC/${p%/}" ] || continue
+  echo "==> Syncing pinned $p (immutable, never deleted)"
+  aws s3 sync --no-progress "$SRC/${p%/}" "s3://$BUCKET/${p%/}" \
+    --cache-control "$IMMUTABLE" \
+    ${AWS_ARGS[@]+"${AWS_ARGS[@]}"}
+done
+
+echo "==> Syncing immutable assets (content-hashed)"
 # Assets go up BEFORE html, so newly-published html never references an asset
 # that has not landed yet.
 excludes=()
 for p in "${MUTABLE_PATTERNS[@]}"; do excludes+=(--exclude "$p"); done
 aws s3 sync --no-progress "$SRC" "s3://$BUCKET" \
   "${excludes[@]}" \
+  ${protected_excludes[@]+"${protected_excludes[@]}"} \
   --cache-control "$IMMUTABLE" \
   ${AWS_ARGS[@]+"${AWS_ARGS[@]}"}
 
 echo "==> Syncing revalidated entry points (html/json/xml/service workers)"
 includes=(--exclude "*")
 for p in "${MUTABLE_PATTERNS[@]}"; do includes+=(--include "$p"); done
-# --delete runs only on this pass, and the CLI applies these same --exclude/
-# --include filters to the delete scan. So stale HTML/JSON is removed, while old
-# content-hashed assets are deliberately left in place: a client that loaded the
-# previous HTML may still be fetching them, and deleting them mid-flight would
-# break that page. Prune them separately when you want the space back.
+# --delete runs only on this pass, and the CLI applies these same filters to the
+# delete scan. So stale HTML/JSON is removed, while old content-hashed assets are
+# deliberately left in place: a client that loaded the previous HTML may still be
+# fetching them, and deleting them mid-flight would break that page. Prune them
+# separately when you want the space back.
+#
+# protected_excludes goes LAST so it overrides the --include rules above and the
+# pinned prefixes are untouched by both the upload and the delete scan.
 aws s3 sync --no-progress "$SRC" "s3://$BUCKET" \
   "${includes[@]}" \
+  ${protected_excludes[@]+"${protected_excludes[@]}"} \
   --delete \
   --cache-control "$REVALIDATE" \
   ${AWS_ARGS[@]+"${AWS_ARGS[@]}"}
@@ -81,11 +118,18 @@ aws s3 sync --no-progress "$SRC" "s3://$BUCKET" \
 #     --metadata-directive REPLACE --cache-control '<value>'
 
 # Invalidate only the mutable entry points. A blanket /* would throw away the
-# benefit of the immutable hashed assets on every single deploy.
+# benefit of the immutable hashed assets on every single deploy, and invalidating
+# a pinned artifact contradicts the promise that its URL never changes - so the
+# protected prefixes are skipped here too.
 echo "==> Invalidating CloudFront"
 paths=()
 while IFS= read -r f; do
-  paths+=("/${f#"$SRC"/}")
+  rel="${f#"$SRC"/}"
+  skip=""
+  for p in ${PROTECTED_PREFIXES[@]+"${PROTECTED_PREFIXES[@]}"}; do
+    case "$rel" in "${p%/}"/*) skip=1 ;; esac
+  done
+  [ -n "$skip" ] || paths+=("/$rel")
 done < <(find "$SRC" \( -name '*.html' -o -name '*.json' -o -name '*.xml' \
                         -o -name '*.txt' -o -name 'service-worker.js' -o -name 'sw.js' \) -type f)
 

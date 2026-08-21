@@ -110,6 +110,7 @@ genuine permissions failure would be indistinguishable from a typo'd URL.
 | `HstsPreload` | `false` | **Read the HSTS note below** |
 | `WebACLArn` | *(empty)* | From `waf-us-east-1.yml`, if you want one |
 | `ProjectTag` | *(empty)* | Adds a `Project` tag to billable resources |
+| `BucketName` | *(empty)* | Explicit bucket name. Empty = CloudFormation generates one — see below |
 
 ## Security notes
 
@@ -149,6 +150,127 @@ The `max-age` is two years, which is what preload submission requires.
 
 Access logging and WAF live in separate stacks (see below). There is no origin
 failover and no geo restriction.
+
+## Naming the bucket
+
+By default CloudFormation generates the bucket name, because a globally-unique
+name someone else already holds fails in a way you cannot fix. Set `BucketName`
+only when a predictable name genuinely matters:
+
+```bash
+--parameter-overrides BucketName=example-com-site
+```
+
+**Avoid dots.** The S3 virtual-hosted-style wildcard certificate
+(`*.s3.<region>.amazonaws.com`) matches only single-label bucket names, so
+`site.example.com.s3.us-west-2.amazonaws.com` may fail TLS validation on the OAC
+origin connection. Use `site-example-com` instead — with OAC the bucket name is
+never user-visible anyway.
+
+The bucket uses `DeletionPolicy: RetainExceptOnCreate`, so a *failed create* does
+not orphan the bucket (which would make every retry fail on the now-taken name),
+while `UpdateReplacePolicy: Retain` still protects live content.
+
+To make a `BucketName` change **fail** rather than silently replace the bucket
+with an empty one, apply the included stack policy once after deploying:
+
+```bash
+aws cloudformation set-stack-policy --stack-name <stack> \
+  --stack-policy-body file://stack-policy-protect-bucket.json --profile example
+```
+
+`aws cloudformation deploy` has no stack-policy flag, so this is a separate call.
+It persists across later deploys. A deliberate rename can still be done with a
+one-time `--stack-policy-during-update-body` override on `update-stack`.
+
+## Publishing permanent, versioned artifacts
+
+`deploy-content.sh` classifies files by extension: HTML/JSON/XML/TXT are treated
+as mutable entry points, revalidated on every request and **removed when the
+build stops emitting them**.
+
+That is wrong for anything published under a URL that encodes a version and is
+pinned by third parties — an API spec at `/v/8665/openapi.json`, for instance.
+It is a `.json` file, so the mutable rules would serve it `max-age=0` and delete
+it the moment the version bumps, breaking every consumer who pinned it.
+
+Paths listed in `PROTECTED_PREFIXES` (default `v/`) are instead uploaded
+immutable, never deleted, and never invalidated:
+
+```bash
+PROTECTED_PREFIXES="v/ releases/" ./deploy-content.sh ./dist <bucket> <dist-id>
+```
+
+URL semantics, not file extension, decide cache and delete policy.
+
+## Optional: GitHub Actions deploy role (OIDC)
+
+`github-oidc-deploy-role.yml` creates a role a GitHub Actions workflow can assume
+with no long-lived AWS keys. It can publish to one bucket and invalidate one
+distribution — nothing else.
+
+```bash
+aws cloudformation deploy --stack-name example-com-deploy-role \
+  --template-file github-oidc-deploy-role.yml \
+  --parameter-overrides GitHubOrg=myorg GitHubRepo=my-site \
+    BucketName=example-com-site DistributionId=E123ABC \
+    RoleName=example-com-gha-deploy \
+  --capabilities CAPABILITY_NAMED_IAM --profile example
+```
+
+It **assumes the GitHub OIDC provider already exists** in the account — that
+provider is account-global and creating a second one errors. Check first:
+
+```bash
+aws iam list-open-id-connect-providers \
+  --query "OpenIDConnectProviderList[?contains(Arn,'githubusercontent')]"
+```
+
+### Immutable subject claims
+
+Some GitHub orgs issue **immutable** subject claims, which embed numeric org and
+repo IDs so a deleted-and-recreated repo cannot inherit the old trust:
+
+```
+repo:myorg@19309466/myrepo@1342119138:ref:refs/heads/main
+```
+
+rather than the classic `repo:myorg/myrepo:ref:refs/heads/main`. A trust policy
+written for the classic form silently fails to match, and the only symptom is an
+opaque `Not authorized to perform sts:AssumeRoleWithWebIdentity`.
+
+Check which form your repo issues **before** deploying:
+
+```bash
+gh api /repos/OWNER/REPO/actions/oidc/customization/sub --jq .sub_claim_prefix
+```
+
+If it comes back with `@`-suffixed IDs, pass them:
+
+```bash
+--parameter-overrides ... \
+  GitHubOrgId=$(gh api /repos/OWNER/REPO --jq '.owner.id') \
+  GitHubRepoId=$(gh api /repos/OWNER/REPO --jq '.id')
+```
+
+The `TrustedSubject` stack output always shows the exact subject the policy
+expects — compare it against the token if assumption fails.
+
+### Scoping
+
+Trust is pinned to one exact ref (`GitHubRef`, default `refs/heads/main`) with
+`StringEquals`, and the parameter rejects wildcards. `repo:org/repo:*` would let
+any branch — including one pushed by anyone with write access — publish to
+production. Because any workflow on the trusted branch can assume the role,
+**branch protection is part of this security boundary**, not separate from it.
+
+In the workflow, grant `id-token: write` and pass the role ARN:
+
+```yaml
+permissions:
+  id-token: write
+  contents: read
+```
 
 ## Optional: access logging
 
@@ -196,7 +318,8 @@ Three **breaking changes**. New deployments are unaffected.
 1. **`DomainName` → `HostedZoneId`.** The template took a root domain name and
    resolved the zone by name, which is ambiguous when a private and a public zone
    share a domain. Pass the zone ID instead.
-2. **The bucket name is now generated.** It used to be `AppDomainName`. S3 bucket
+2. **The bucket name is now generated by default.** It used to be
+   `AppDomainName`. S3 bucket
    names are globally unique across *all* AWS accounts, so owning a domain gives
    you no claim on the matching bucket name — deployments failed for reasons users
    could not fix. With OAC the origin is addressed by its regional domain name, so

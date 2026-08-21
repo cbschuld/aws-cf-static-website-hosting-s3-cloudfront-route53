@@ -226,6 +226,23 @@ aws s3api delete-objects --bucket <bucket> --profile example \
 aws cloudformation delete-stack --stack-name <stack> --profile example
 ```
 
+Then delete the certificate stack. **ACM does not remove the DNS validation
+record it created**, so deleting the certificate leaves an orphaned
+`_<hash>.<domain>` CNAME behind in your hosted zone. CloudFormation will not
+clean it up either, because ACM created it rather than the stack. Remove it by
+hand:
+
+```bash
+ZONE=Z1UVA2VESUQ1UN
+REC=$(aws route53 list-resource-record-sets --hosted-zone-id $ZONE --profile example --output json \
+  | jq -c '[.ResourceRecordSets[] | select(.Type=="CNAME" and (.Name|startswith("_")))][0]')
+aws route53 change-resource-record-sets --hosted-zone-id $ZONE --profile example \
+  --change-batch "$(jq -n --argjson r "$REC" '{Changes:[{Action:"DELETE",ResourceRecordSet:$r}]}')"
+```
+
+Check the selected record before deleting if the zone contains other underscore
+CNAMEs (DKIM, other ACM certs) — the filter above takes the first match.
+
 ## Development
 
 ```bash

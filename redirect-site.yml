@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Redirect-only CloudFront distribution - 301s every request to another URL"
+
+# WHAT THIS IS FOR
+#
+# Retiring a hostname onto a new one while keeping old links, bookmarks and
+# search results working. It serves no content: a viewer-request CloudFront
+# Function answers every request with a 301, so the origin is never reached.
+#
+# DNS IS DELIBERATELY NOT IN THIS TEMPLATE.
+#
+# The hostname being retired usually already resolves - often via a CNAME this
+# stack does not own. AWS::Route53::RecordSetGroup will neither adopt nor delete
+# a pre-existing record: it would try to create the A/AAAA alias alongside the
+# CNAME and fail with InvalidChangeBatch, because Route53 will not hold a CNAME
+# and an A record at the same name.
+#
+# So: deploy this stack, test against the distribution's own *.cloudfront.net
+# name, then cut DNS over with a SINGLE Route53 change batch that DELETEs the old
+# record and CREATEs the A + AAAA aliases. A change batch is applied atomically.
+# See the README for the exact command.
+
+Parameters:
+  SourceDomain:
+    Type: String
+    AllowedPattern: "^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$"
+    Description: "The hostname being retired, e.g. old.example.com"
+
+  RedirectTarget:
+    Type: String
+    AllowedPattern: "^https://[^\\s]+$"
+    ConstraintDescription: "Must be an absolute https:// URL."
+    Description: >-
+      Absolute URL to send everyone to. Consider ending it with '#': with no
+      fragment in the Location header a browser carries the ORIGINAL fragment
+      across the redirect, so an old #/deep/link would be appended to the new URL
+      and can confuse the target app's own hash routing. A trailing '#' is an
+      empty fragment, which discards it.
+
+  CertificateARN:
+    Type: String
+    AllowedPattern: "^arn:[a-z0-9-]+:acm:us-east-1:[0-9]{12}:certificate/[0-9a-f-]+$"
+    ConstraintDescription: >-
+      Must be an ACM certificate ARN in us-east-1 - CloudFront accepts no other
+      region - and it must cover SourceDomain.
+    Description: "ACM cert covering SourceDomain. One cert can back many distributions."
+
+  RedirectStatus:
+    Type: String
+    Default: "301"
+    AllowedValues: ["301", "302"]
+    Description: >-
+      Use 302 while testing. Browsers cache a 301 aggressively and will not
+      re-request the old URL, which makes a wrong target effectively permanent
+      for anyone who already followed it. Switch to 301 once verified.
+
+  PriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues: [PriceClass_100, PriceClass_200, PriceClass_All]
+    Description: "Edge locations. A redirect is tiny, so the cheapest class is usually right."
+
+  MinimumProtocolVersion:
+    Type: String
+    Default: TLSv1.2_2025
+    AllowedValues: [TLSv1.2_2019, TLSv1.2_2021, TLSv1.2_2025, TLSv1.3_2025]
+    Description: "Keep this at least as strong as the site being redirected TO."
+
+Resources:
+  RedirectFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      # Name must match [a-zA-Z0-9-_]{1,64} - dots are invalid, so this cannot be
+      # derived from SourceDomain.
+      Name: !Sub "${AWS::StackName}-redirect"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: !Sub "301 ${SourceDomain} -> ${RedirectTarget}"
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub
+        - |
+          function handler(event) {
+              return {
+                  statusCode: ${RedirectStatus},
+                  statusDescription: '${StatusText}',
+                  headers: {
+                      location: { value: '${RedirectTarget}' },
+                      // A retired host should not linger in search results.
+                      'cache-control': { value: 'max-age=3600' }
+                  }
+              };
+          }
+        - StatusText: !If [IsPermanent, "Moved Permanently", "Found"]
+
+  RedirectDistribution:
+    Type: AWS::CloudFront::Distribution
+    # Scoped to THIS resource on purpose. A global skip would also silence these
+    # for static-website.yml, where redirect-to-https is mandatory and the WAF
+    # hook is a real (opt-in) parameter.
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_34
+            comment: >-
+              allow-all is deliberate for a redirect-only distribution. CloudFront
+              runs the protocol redirect BEFORE the viewer-request function, so
+              redirect-to-https costs an http visitor two hops - and retired
+              hostnames are precisely where inbound links are still http://. The
+              function answers both schemes in one hop and only ever redirects to
+              an https:// destination, so no content is served over plaintext.
+          - id: CKV_AWS_68
+            comment: >-
+              This distribution serves no content. Every request is terminated by
+              a viewer-request function returning a 301 before the cache or origin
+              is reached, so there is no application surface for a WAF to protect.
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !Ref SourceDomain
+        Comment: !Sub "Redirect ${SourceDomain} -> ${RedirectTarget}"
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: !Ref PriceClass
+
+        # A distribution requires an origin even when one is never contacted.
+        # example.invalid is reserved by RFC 2606 and can never be registered, so
+        # this fails CLOSED: if the function association were ever removed, the
+        # origin fetch errors instead of reaching a host someone else controls.
+        Origins:
+          - Id: unused
+            DomainName: example.invalid
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+
+        DefaultCacheBehavior:
+          TargetOriginId: unused
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          # allow-all, NOT redirect-to-https, and that is deliberate.
+          #
+          # CloudFront applies the viewer protocol redirect BEFORE running the
+          # viewer-request function, so redirect-to-https would cost an http
+          # visitor TWO hops: http->https on the old host, then ->the new site.
+          # Retired hosts are exactly where inbound links are still http://.
+          # With allow-all the function answers both schemes in one hop and
+          # always sends people to an https:// destination, so nothing is served
+          # over plaintext either way - there is simply one less round trip.
+          ViewerProtocolPolicy: allow-all
+          # Managed CachingDisabled. The function terminates every request before
+          # the cache is consulted, so this only avoids a pointless cache.
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt RedirectFunction.FunctionMetadata.FunctionARN
+
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateARN
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: !Ref MinimumProtocolVersion
+
+Conditions:
+  IsPermanent: !Equals [!Ref RedirectStatus, "301"]
+
+Outputs:
+  DistributionId:
+    Value: !Ref RedirectDistribution
+  DistributionDomainName:
+    Description: "Test against this BEFORE cutting DNS over"
+    Value: !GetAtt RedirectDistribution.DomainName
+  CloudFrontHostedZoneId:
+    Description: "Use as HostedZoneId in the Route53 alias target (always Z2FDTNDATAQYW2)"
+    Value: Z2FDTNDATAQYW2

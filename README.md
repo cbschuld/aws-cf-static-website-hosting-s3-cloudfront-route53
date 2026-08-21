@@ -90,6 +90,17 @@ jq -r '.HostedZones[] | select(.Name=="example.com.") | .Id'
 `/`. It deliberately does **not** rewrite extensionless URLs, so files like
 `/LICENSE`, `/robots` and `/CNAME` are still served as themselves.
 
+`static` mode rewrites only URIs **ending in a slash**, so `/reference/` works
+but `/reference` 404s. List such routes in `DirectoryRedirects` to have them 301
+to the canonical trailing-slash URL:
+
+```bash
+--parameter-overrides SiteType=static DirectoryRedirects=/reference,/guide
+```
+
+There is deliberately no "redirect anything without a dot" rule — that would
+break legitimate extensionless objects like `/LICENSE`, `/robots` or `/CNAME`.
+
 Both modes grant CloudFront `s3:ListBucket`. Without it S3 answers **403** for a
 missing key rather than 404, so a static site could never return a real 404 and a
 genuine permissions failure would be indistinguishable from a typo'd URL.
@@ -102,6 +113,7 @@ genuine permissions failure would be indistinguishable from a typo'd URL.
 | `HostedZoneId` | — | Route53 zone that owns the domain |
 | `CertificateARN` | — | ACM cert, **must** be `us-east-1` |
 | `SiteType` | `spa` | `spa` or `static` — see above |
+| `DirectoryRedirects` | *(empty)* | Exact paths to 301 to their trailing-slash form, e.g. `/reference` |
 | `PriceClass` | `PriceClass_100` | Cost decision; `_All` for global reach |
 | `MinimumProtocolVersion` | `TLSv1.2_2025` | `TLSv1.3_2025` drops TLS 1.2 entirely |
 | `ContentSecurityPolicy` | restrictive subset | Empty string omits the header |
@@ -271,6 +283,79 @@ permissions:
   id-token: write
   contents: read
 ```
+
+## Retiring a hostname (`redirect-site.yml`)
+
+Points an old hostname at a new URL with a 301, keeping bookmarks, inbound links
+and search results working. It serves no content — a viewer-request CloudFront
+Function answers every request, so the origin is never reached.
+
+```bash
+aws cloudformation deploy --stack-name old-example-com-redirect \
+  --template-file redirect-site.yml \
+  --parameter-overrides \
+    SourceDomain=old.example.com \
+    RedirectTarget='https://new.example.com/#' \
+    CertificateARN=arn:aws:acm:us-east-1:123456789012:certificate/... \
+    RedirectStatus=302 \
+  --profile example
+```
+
+Start with `RedirectStatus=302`. Browsers cache a 301 aggressively and stop
+re-requesting the old URL, so a wrong target is effectively permanent for anyone
+who already followed it. Switch to `301` once verified.
+
+**End the target with `#`** unless you want old fragments carried over. With no
+fragment in the `Location` header, browsers append the *original* one, so
+`old.example.com/#/deep/link` lands as `https://new.example.com/#/deep/link` —
+which can confuse the new site's own hash routing. A trailing `#` is an empty
+fragment and discards it.
+
+### Two design choices worth knowing
+
+**`ViewerProtocolPolicy` is `allow-all`, not `redirect-to-https`.** CloudFront
+applies the protocol redirect *before* running the viewer-request function, so
+`redirect-to-https` would cost an HTTP visitor two hops — `http→https` on the old
+host, then on to the new site. Retired hostnames are exactly where inbound links
+are still `http://`. With `allow-all` the function answers both schemes in one
+hop and always redirects to an `https://` destination, so nothing is served over
+plaintext either way.
+
+**The origin is `example.invalid`.** A distribution requires an origin even when
+one is never contacted. `.invalid` is reserved by RFC 2606 and can never be
+registered, so this fails *closed*: if the function association were ever
+removed, the origin fetch errors rather than reaching a host somebody else
+controls.
+
+### DNS cutover — not handled by the stack
+
+The hostname being retired usually already resolves, often via a CNAME the stack
+does not own. `AWS::Route53::RecordSetGroup` will neither adopt nor delete a
+pre-existing record: it would try to create the alias alongside the CNAME and
+fail with `InvalidChangeBatch`, because Route53 will not hold a CNAME and an A
+record at the same name.
+
+Deploy the stack, test against the distribution's own `*.cloudfront.net` name,
+then cut over with a **single change batch** — Route53 applies one atomically:
+
+```bash
+aws route53 change-resource-record-sets --hosted-zone-id ZXXXXXXXXXXXX --profile example \
+  --change-batch '{"Changes":[
+    {"Action":"DELETE","ResourceRecordSet":{
+      "Name":"old.example.com.","Type":"CNAME","TTL":300,
+      "ResourceRecords":[{"Value":"<exact current value>"}]}},
+    {"Action":"CREATE","ResourceRecordSet":{
+      "Name":"old.example.com.","Type":"A",
+      "AliasTarget":{"HostedZoneId":"Z2FDTNDATAQYW2","DNSName":"dXXXX.cloudfront.net.","EvaluateTargetHealth":false}}},
+    {"Action":"CREATE","ResourceRecordSet":{
+      "Name":"old.example.com.","Type":"AAAA",
+      "AliasTarget":{"HostedZoneId":"Z2FDTNDATAQYW2","DNSName":"dXXXX.cloudfront.net.","EvaluateTargetHealth":false}}}
+  ]}'
+```
+
+The DELETE must match the existing record's name, type, TTL **and** value
+exactly or the whole batch is rejected. Check the old record's TTL first — it
+governs how long stragglers keep hitting the old target.
 
 ## Optional: access logging
 

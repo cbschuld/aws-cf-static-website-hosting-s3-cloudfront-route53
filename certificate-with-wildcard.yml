@@ -1,13 +1,20 @@
 AWSTemplateFormatVersion: "2010-09-09"
+Description: "ACM certificate (with wildcard SAN) for CloudFront - MUST be deployed to us-east-1"
+
+# NOTE: CloudFront can only attach certificates from us-east-1, no matter which
+# region the website stack itself is deployed to. Deploying this template
+# anywhere else produces a certificate CloudFront cannot use - and the failure
+# does not surface until you try to create the distribution.
+
 Parameters:
   DomainName:
-    Description: "Domain for which you are requesting a cert (note the wildcard will be added)"
+    Description: "Domain for which you are requesting a cert (the *.domain wildcard is added as a SAN)"
     Type: String
-    Default: example.com #Put your own domain name here
+    AllowedPattern: "^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$"
+    ConstraintDescription: "Must be a valid fully-qualified domain name (e.g. example.com)"
   HostedZoneId:
-    Description: "hosted zone id in which CNAME record for the validation needs to be added"
-    Type: String
-    Default: XYZABCDERYH #Put the hosted zone id in which CNAME record for the validation needs to be added
+    Description: "Hosted zone id in which the CNAME record for DNS validation is created"
+    Type: AWS::Route53::HostedZone::Id
 
 Resources:
   Certificate:
@@ -20,8 +27,11 @@ Resources:
         - DomainName: !Ref DomainName
           HostedZoneId: !Ref HostedZoneId
       ValidationMethod: DNS
+      CertificateTransparencyLoggingPreference: ENABLED
+
 Outputs:
   CertificateArn:
+    Description: "Pass this to static-website.yml as the CertificateARN parameter"
     Value: !Ref Certificate
     Export:
       Name: !Sub "${AWS::StackName}-CertificateArn"
